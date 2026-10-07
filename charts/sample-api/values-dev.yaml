@@ -3,4 +3,4 @@ environment: dev
 image:
   repository: ghcr.io/sameerkhan8/sample-api
   # CI (.github/workflows/ci.yml) sets this to an immutable sha-<7 chars> tag after every merge to main.
-  tag: "main"
+  tag: "sha-788a25b"
