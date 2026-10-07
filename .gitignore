@@ -1,0 +1,73 @@
+# ---------------------------------------------------------------------------
+# Local cluster state. Never commit kubeconfigs: they hold cluster credentials.
+# ---------------------------------------------------------------------------
+.kube/
+kubeconfig*
+*.kubeconfig
+
+# Bare git mirror served to Argo CD by "make gitops-local"
+.gitops/
+
+# Tool binaries downloaded by scripts
+.bin/
+
+# ---------------------------------------------------------------------------
+# Terraform. State and tfvars can contain secrets and real project ids.
+# .terraform.lock.hcl IS committed (it pins provider checksums).
+# ---------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# ---------------------------------------------------------------------------
+# Secrets and keys
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+gha-creds-*.json
+
+# ---------------------------------------------------------------------------
+# Editors, OS, logs
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+*.log

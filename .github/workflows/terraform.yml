@@ -1,0 +1,171 @@
+# Checks for the GKE Terraform module (terraform/gcp-gke).
+#
+# validate: runs on every change. Needs no cloud credentials.
+# plan:     runs on pull requests only, read-only, and only after the GitHub
+#           variables below are configured. It logs in to GCP with GitHub OIDC
+#           (Workload Identity Federation). No JSON keys are used. It never applies.
+#           It runs in the GitHub Environment "tf-plan": give it required reviewers, so
+#           pull request code never runs with the plan identity before a review.
+name: terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+      - "versions.env"
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+      - "versions.env"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    name: fmt, validate, test, tflint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Load pinned versions
+        run: grep -E '^[A-Z0-9_]+=' versions.env >> "$GITHUB_ENV"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      # Terraform warns on every command if the cache directory is missing (first run, cache miss).
+      - name: Create provider cache directory
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Cache Terraform providers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.terraform.d/plugin-cache
+          key: terraform-providers-${{ runner.os }}-${{ hashFiles('terraform/gcp-gke/.terraform.lock.hcl') }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff terraform
+
+      - name: terraform init (no backend)
+        working-directory: terraform/gcp-gke
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        working-directory: terraform/gcp-gke
+        run: terraform validate
+
+      # Offline unit tests (tests/*.tftest.hcl). The google provider is mocked:
+      # no credentials, no API calls, nothing is created.
+      - name: terraform test
+        working-directory: terraform/gcp-gke
+        run: terraform test
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+          tflint_config_path: terraform/gcp-gke/.tflint.hcl
+          cache: true
+
+      - name: tflint
+        working-directory: terraform/gcp-gke
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # avoids GitHub API rate limits when downloading plugins
+        run: |
+          tflint --init
+          tflint --format compact
+
+  plan:
+    name: Plan (read-only, GitHub OIDC)
+    needs: validate
+    # Skipped automatically until the GitHub variables are configured; no JSON keys are used.
+    # Variables (Settings > Secrets and variables > Actions > Variables), all from the module outputs:
+    #   GCP_WORKLOAD_IDENTITY_PROVIDER  output workload_identity_provider
+    #   GCP_TF_PLAN_SERVICE_ACCOUNT     output tf_plan_service_account_email
+    #   GCP_PROJECT_ID                  your project id
+    #   TF_STATE_BUCKET                 the GCS bucket that holds the state
+    # Pull requests from forks never get here: they cannot request an OIDC token for this repo.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+    # Only jobs in this environment may use gh-tf-plan (terraform/gcp-gke/workload-identity.tf).
+    environment: tf-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # request a short-lived GitHub OIDC token for Workload Identity Federation
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_VAR_github_repository_id: ${{ github.repository_id }}
+      TF_VAR_github_owner_id: ${{ github.repository_owner_id }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Load pinned versions
+        run: grep -E '^[A-Z0-9_]+=' versions.env >> "$GITHUB_ENV"
+
+      - name: Authenticate to Google Cloud (OIDC, no keys)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_TF_PLAN_SERVICE_ACCOUNT }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init (remote state)
+        working-directory: terraform/gcp-gke
+        run: terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}" -backend-config="prefix=gcp-gke"
+
+      # -lock=false: the plan service account can read the state but not write a lock.
+      # The full plan is NOT printed: in a public repository, run logs and summaries are
+      # public, and a plan shows project IDs, IAM members and CIDRs. Only a summary is shown.
+      - name: terraform plan
+        working-directory: terraform/gcp-gke
+        run: |
+          # tf_state_bucket is passed too, so the plan does not propose removing the plan SA's
+          # read access to the state bucket. Pass other non-default inputs as TF_VAR_* variables.
+          terraform plan -input=false -lock=false -no-color -out="$RUNNER_TEMP/tfplan" \
+            -var "project_id=${GCP_PROJECT_ID}" \
+            -var "tf_state_bucket=${TF_STATE_BUCKET}" > "$RUNNER_TEMP/plan.log"
+          terraform show -json "$RUNNER_TEMP/tfplan" > "$RUNNER_TEMP/plan.json"
+          {
+            echo "### Terraform plan: terraform/gcp-gke"
+            echo
+            echo "| Action | Resources |"
+            echo "|---|---|"
+            jq -r '[.resource_changes[] | .change.actions | join("+")] | group_by(.) | map("| \(.[0]) | \(length) |") | .[]' "$RUNNER_TEMP/plan.json"
+            echo
+            echo "Resources that would change (addresses only):"
+            echo
+            jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "- `\(.address)`: \(.change.actions | join("+"))"' "$RUNNER_TEMP/plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"

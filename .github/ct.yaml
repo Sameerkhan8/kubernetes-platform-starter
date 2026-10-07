@@ -1,0 +1,9 @@
+# chart-testing (ct) configuration, used by .github/workflows/helm.yml ("ct lint").
+# ct lint runs helm lint, yamllint and a Chart.yaml schema check.
+chart-dirs:
+  - charts
+target-branch: main
+# Chart.yaml lists a person's name, not a GitHub username, so skip that check.
+validate-maintainers: false
+# This chart lives with its app and is never published to a chart repository.
+check-version-increment: false

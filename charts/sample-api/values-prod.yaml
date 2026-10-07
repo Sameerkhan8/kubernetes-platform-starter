@@ -1,0 +1,50 @@
+# Example production profile. It is linted and schema-checked in CI, but never applied locally.
+# It assumes a GKE cluster like terraform/gcp-gke with GKE's managed Gateway API.
+environment: prod
+image:
+  # Release tags come from git tags: pushing tag v0.1.0 makes CI publish
+  # ghcr.io/sameerkhan8/sample-api:0.1.0 (.github/workflows/ci.yml). Prod is then
+  # promoted by a pull request that changes this line, never by CI directly.
+  tag: "0.1.0"
+app:
+  # No /work, /error or API docs, and GET / does not show pod or node names.
+  demoEndpoints: false
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+resources:
+  requests:
+    cpu: 200m
+    memory: 128Mi
+  limits:
+    cpu: null  # null removes the CPU limit: no CFS throttling in prod
+    memory: 256Mi
+pdb:
+  minAvailable: 2
+httpRoute:
+  hostnames:
+    - app.example.com
+  parentRefs:
+    - name: public-gateway
+      namespace: gateway-system
+      sectionName: https
+  # Only the public API is routed. /metrics, /healthz and /readyz stay inside the cluster
+  # (Prometheus scrapes the Service directly). Add your real API paths here.
+  matches:
+    - path:
+        type: Exact
+        value: /
+networkPolicy:
+  # A GKE managed Gateway runs no pods in the cluster. Google's load balancer proxies and
+  # health checks reach the pod IPs directly from these ranges (global external Application
+  # Load Balancer, GatewayClass gke-l7-global-external-managed). For a regional gateway,
+  # use your proxy-only subnet range instead.
+  allowFromNamespaces:
+    - monitoring       # self-hosted Prometheus; use gmp-system for Google Managed Prometheus
+  allowFromCIDRs:
+    - 35.191.0.0/16
+    - 130.211.0.0/22

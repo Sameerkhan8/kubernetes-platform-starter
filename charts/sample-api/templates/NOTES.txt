@@ -1,0 +1,24 @@
+sample-api {{ .Chart.AppVersion }} is deployed as "{{ include "sample-api.fullname" . }}" in namespace "{{ .Release.Namespace }}".
+Image: {{ include "sample-api.image" . }}
+{{- if .Values.httpRoute.enabled }}
+
+URL(s) through the Gateway API route:
+{{- range .Values.httpRoute.hostnames }}
+  http://{{ . }}/
+{{- end }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+
+URL through the Ingress: http://{{ .Values.ingress.host }}/
+{{- end }}
+
+Check the pods:
+  kubectl --context <your-context> -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+{{- if .Values.app.demoEndpoints }}
+
+Try the endpoints: /  /healthz  /readyz  /metrics  /work?ms=100  /error?rate=0.5  /docs
+{{- else }}
+
+Demo endpoints are off (app.demoEndpoints=false): /work, /error and the API docs return 404.
+{{- end }}

@@ -1,0 +1,14 @@
+# metrics-server feeds CPU and memory usage to the HorizontalPodAutoscaler and "kubectl top".
+# Chart: metrics-server (https://kubernetes-sigs.github.io/metrics-server/),
+# version METRICS_SERVER_CHART_VERSION in versions.env.
+
+args:
+  # kind kubelets use self-signed certs; never do this in production.
+  - --kubelet-insecure-tls
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 48Mi
+  limits:
+    memory: 128Mi

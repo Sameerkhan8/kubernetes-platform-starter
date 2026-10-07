@@ -1,0 +1,21 @@
+# Argo CD project for kubernetes-platform-starter.
+# A project limits what its applications may deploy: which Git repos, which clusters and
+# namespaces, and which cluster-wide kinds. Here: this repo only, namespace "demo" only,
+# and the only cluster-scoped kind allowed is Namespace (for CreateNamespace=true).
+# "make gitops-local" adds the local git daemon URL (git://kps-git/...) to sourceRepos at
+# apply time, on the laptop only. The committed file allows the GitHub repo and nothing else.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: kps
+  namespace: argocd
+spec:
+  description: Applications of kubernetes-platform-starter
+  sourceRepos:
+    - https://github.com/Sameerkhan8/kubernetes-platform-starter.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: demo
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace

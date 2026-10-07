@@ -1,0 +1,5 @@
+# shellcheck settings for scripts/*.sh (found automatically by shellcheck 0.8+).
+# Follow "source lib.sh" relative to the script's own folder, so "shellcheck scripts/*.sh"
+# checks the sourced helpers too.
+source-path=SCRIPTDIR
+external-sources=true

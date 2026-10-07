@@ -1,0 +1,93 @@
+groups:
+  - name: sample-api.alerts
+    rules:
+      - alert: SampleApiDown
+        expr: absent(up{job="sample-api"} == 1)
+        for: 2m
+        labels:
+          severity: critical
+          component: sample-api
+        annotations:
+          summary: No sample-api pod is being scraped successfully.
+          description: Prometheus has not scraped a healthy sample-api target for 2 minutes. Users are probably getting errors from the gateway.
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiDown.md
+
+      - alert: SampleApiHighErrorRate
+        expr: |
+          (
+            sum by (namespace) (rate(http_requests_total{job="sample-api", status=~"5.."}[5m]))
+            /
+            sum by (namespace) (rate(http_requests_total{job="sample-api"}[5m]))
+          ) > 0.05
+          and
+          sum by (namespace) (rate(http_requests_total{job="sample-api"}[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          component: sample-api
+        annotations:
+          summary: sample-api is returning more than 5% errors (5xx).
+          description: '{{ $value | humanizePercentage }} of sample-api requests in namespace {{ $labels.namespace }} returned a 5xx status over the last 5 minutes.'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiHighErrorRate.md
+
+      - alert: SampleApiHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (namespace, le) (rate(http_request_duration_seconds_bucket{job="sample-api", path!="/work"}[5m]))
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: sample-api
+        annotations:
+          summary: sample-api p95 latency is above 500ms.
+          description: 'p95 latency in namespace {{ $labels.namespace }} is {{ $value | humanizeDuration }} (threshold 500ms; the /work CPU-burn endpoint is excluded).'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiHighLatencyP95.md
+
+      - alert: SampleApiPodRestarting
+        expr: increase(kube_pod_container_status_restarts_total{container="sample-api"}[15m]) > 2
+        for: 1m
+        labels:
+          severity: warning
+          component: sample-api
+        annotations:
+          summary: A sample-api container keeps restarting.
+          description: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} restarted about {{ $value | humanize }} times in the last 15 minutes.'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiPodRestarting.md
+
+      - alert: SampleApiHpaMaxedOut
+        # The second half skips an HPA whose min equals its max (capacity pinned on purpose).
+        expr: |
+          (
+            max by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler="sample-api"})
+            >=
+            max by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler="sample-api"})
+          )
+          and on (namespace, horizontalpodautoscaler)
+          (
+            max by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler="sample-api"})
+            !=
+            max by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_spec_min_replicas{horizontalpodautoscaler="sample-api"})
+          )
+        for: 5m
+        labels:
+          severity: warning
+          component: sample-api
+        annotations:
+          summary: sample-api autoscaler is stuck at its maximum replicas.
+          description: 'HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} has been at its maximum ({{ $value }} replicas) for 5 minutes. It cannot add more capacity.'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiHpaMaxedOut.md
+
+      - alert: SampleApiReplicasUnavailable
+        expr: |
+          max by (namespace, deployment) (kube_deployment_spec_replicas{deployment="sample-api"})
+          >
+          max by (namespace, deployment) (kube_deployment_status_replicas_available{deployment="sample-api"})
+        for: 10m
+        labels:
+          severity: warning
+          component: sample-api
+        annotations:
+          summary: sample-api has fewer available pods than desired.
+          description: 'Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has had fewer available replicas than desired for 10 minutes.'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiReplicasUnavailable.md

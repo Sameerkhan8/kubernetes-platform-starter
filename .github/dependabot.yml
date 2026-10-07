@@ -1,0 +1,69 @@
+# Dependabot opens weekly pull requests for pinned dependencies.
+# Every update goes through CI (tests, Trivy, helm, terraform checks) before it merges.
+# Minor and patch updates are grouped into one pull request per ecosystem.
+# cooldown waits a few days after a release, so a broken or hijacked release
+# has time to be pulled before we adopt it.
+#
+# Not covered by Dependabot: the tool and chart versions in versions.env
+# (kind, Helm, kube-prometheus-stack, promtool, ...). Bump those by hand, then run "make lint".
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /app
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      python-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /app
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      app-image-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /gitops/local
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      gitd-image-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: terraform
+    directory: /terraform/gcp-gke
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      terraform-minor-patch:
+        update-types: [minor, patch]

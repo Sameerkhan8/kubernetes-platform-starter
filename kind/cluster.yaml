@@ -1,0 +1,36 @@
+# Local Kubernetes cluster for kubernetes-platform-starter.
+# 1 control-plane + 2 workers, so pod spreading and node failure can be shown on a laptop.
+#
+# Do not run "kind create" by hand. Use "make cluster": scripts/cluster.sh copies this file,
+# swaps in HOST_HTTP_PORT / HOST_HTTPS_PORT and KIND_NODE_IMAGE (from versions.env), and
+# writes the kubeconfig to the repo-local .kube/config so your default kubeconfig is never touched.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kps
+nodes:
+  # Runs the Kubernetes control plane and the Traefik gateway (hostPort 80/443).
+  # It keeps its NoSchedule taint, so app pods only run on the two workers.
+  # It has no zone label, so the zone spread only counts the workers.
+  - role: control-plane
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    labels:
+      ingress-ready: "true"
+    extraPortMappings:
+      # 127.0.0.1 only: the gateway is reachable from this laptop, not from the LAN.
+      - containerPort: 80
+        hostPort: 80          # HOST_HTTP_PORT
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443         # HOST_HTTPS_PORT
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+  # Two workers in two fake zones, so topologySpreadConstraints have something to spread over.
+  - role: worker
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    labels:
+      topology.kubernetes.io/zone: zone-a
+  - role: worker
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    labels:
+      topology.kubernetes.io/zone: zone-b

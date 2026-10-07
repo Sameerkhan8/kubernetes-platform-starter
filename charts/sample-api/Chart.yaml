@@ -1,0 +1,19 @@
+apiVersion: v2
+name: sample-api
+description: Production-style FastAPI service used to demo the kubernetes-platform-starter platform.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.30.0-0"  # native preStop sleep action
+home: https://github.com/Sameerkhan8/kubernetes-platform-starter
+sources:
+  - https://github.com/Sameerkhan8/kubernetes-platform-starter
+maintainers:
+  - name: Sameer Pathan
+    url: https://github.com/Sameerkhan8
+keywords:
+  - fastapi
+  - gateway-api
+  - hpa
+  - prometheus
+  - argocd

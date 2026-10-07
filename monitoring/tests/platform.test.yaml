@@ -1,0 +1,172 @@
+# Unit tests for the platform alerts (monitoring/rules/platform.rules.yaml).
+# Run: promtool test rules monitoring/tests/*.test.yaml   (or: make lint-rules)
+# Series syntax: 'a+bxN' = a, a+b, ... (N+1 samples); '_' = missing sample.
+rule_files:
+  - ../rules/platform.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------ PlatformPodCrashLooping
+  - name: PlatformPodCrashLooping fires even though the waiting series comes and goes
+    interval: 1m
+    input_series:
+      # kube-state-metrics only exports this series while the container is waiting, so a
+      # crash-looping container shows up as a flapping series. max_over_time(...[5m]) bridges the gaps.
+      - series: 'kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="monitoring",pod="grafana-7c9d8f6b5-abcde",container="grafana",reason="CrashLoopBackOff"}'
+        values: '1 _ 1 _ 1 _ 1 _ 1 _ 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PlatformPodCrashLooping
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: PlatformPodCrashLooping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: platform
+              job: kube-state-metrics
+              namespace: monitoring
+              pod: grafana-7c9d8f6b5-abcde
+              container: grafana
+              reason: CrashLoopBackOff
+            exp_annotations:
+              summary: A container is crash looping.
+              description: 'Container grafana in pod monitoring/grafana-7c9d8f6b5-abcde has been in CrashLoopBackOff for 5 minutes.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/PlatformPodCrashLooping.md
+
+  - name: PlatformPodCrashLooping covers every namespace, including ones the platform does not own
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="team-x",pod="worker-1",container="worker",reason="CrashLoopBackOff"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PlatformPodCrashLooping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: platform
+              job: kube-state-metrics
+              namespace: team-x
+              pod: worker-1
+              container: worker
+              reason: CrashLoopBackOff
+            exp_annotations:
+              summary: A container is crash looping.
+              description: 'Container worker in pod team-x/worker-1 has been in CrashLoopBackOff for 5 minutes.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/PlatformPodCrashLooping.md
+
+  - name: PlatformPodCrashLooping ignores other waiting reasons
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="demo",pod="sample-api-6d4f9c7b8-x2x9k",container="sample-api",reason="ImagePullBackOff"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PlatformPodCrashLooping
+        exp_alerts: []
+
+  # ------------------------------------------------------------------ PlatformNodeNotReady
+  - name: PlatformNodeNotReady fires after a node is not Ready for 5m
+    interval: 1m
+    input_series:
+      - series: 'kube_node_status_condition{job="kube-state-metrics",node="kps-worker",condition="Ready",status="true"}'
+        values: '1x12'
+      - series: 'kube_node_status_condition{job="kube-state-metrics",node="kps-worker2",condition="Ready",status="true"}'
+        values: '1x2 0x10'
+      - series: 'kube_node_status_condition{job="kube-state-metrics",node="kps-worker2",condition="Ready",status="false"}'
+        values: '0x2 1x10'
+    alert_rule_test:
+      # Not Ready since 2m: still pending at 6m.
+      - eval_time: 6m
+        alertname: PlatformNodeNotReady
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: PlatformNodeNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: platform
+              job: kube-state-metrics
+              node: kps-worker2
+              condition: Ready
+              status: "true"
+            exp_annotations:
+              summary: A Kubernetes node is not Ready.
+              description: 'Node kps-worker2 has not been Ready for 5 minutes. Pods on it may be evicted.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/PlatformNodeNotReady.md
+
+  # ------------------------------------------------------------------ PlatformNodeMemoryHigh
+  - name: PlatformNodeMemoryHigh fires after 10m above 90% memory use
+    interval: 1m
+    input_series:
+      # 16 GB total, 0.8 GB available = 95% used.
+      - series: 'node_memory_MemTotal_bytes{job="node-exporter",instance="172.18.0.3:9100"}'
+        values: '16000000000x20'
+      - series: 'node_memory_MemAvailable_bytes{job="node-exporter",instance="172.18.0.3:9100"}'
+        values: '800000000x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: PlatformNodeMemoryHigh
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: PlatformNodeMemoryHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: platform
+              job: node-exporter
+              instance: 172.18.0.3:9100
+            exp_annotations:
+              summary: Node memory use is above 90%.
+              description: 'Memory use on 172.18.0.3:9100 is 95%. On kind, all nodes share the laptop memory.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/PlatformNodeMemoryHigh.md
+
+  - name: PlatformNodeMemoryHigh stays quiet at 80% memory use
+    interval: 1m
+    input_series:
+      - series: 'node_memory_MemTotal_bytes{job="node-exporter",instance="172.18.0.3:9100"}'
+        values: '16000000000x20'
+      - series: 'node_memory_MemAvailable_bytes{job="node-exporter",instance="172.18.0.3:9100"}'
+        values: '3200000000x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PlatformNodeMemoryHigh
+        exp_alerts: []
+
+  # ------------------------------------------------------------------ ArgoCdAppOutOfSync
+  - name: ArgoCdAppOutOfSync fires after 15m out of sync
+    interval: 1m
+    input_series:
+      - series: 'argocd_app_info{job="argocd-application-controller-metrics",namespace="argocd",name="sample-api-dev",project="kps",dest_namespace="demo",dest_server="https://kubernetes.default.svc",sync_status="OutOfSync",health_status="Healthy"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ArgoCdAppOutOfSync
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: ArgoCdAppOutOfSync
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: platform
+              name: sample-api-dev
+              dest_namespace: demo
+            exp_annotations:
+              summary: An Argo CD application is not in sync with Git.
+              description: 'Argo CD application sample-api-dev (target namespace demo) has not been Synced for 15 minutes.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/ArgoCdAppOutOfSync.md
+
+  - name: ArgoCdAppOutOfSync ignores a short out-of-sync period (a normal deploy)
+    interval: 1m
+    input_series:
+      # Argo CD exports a new series when sync_status changes.
+      - series: 'argocd_app_info{job="argocd-application-controller-metrics",namespace="argocd",name="sample-api-dev",project="kps",dest_namespace="demo",dest_server="https://kubernetes.default.svc",sync_status="OutOfSync",health_status="Progressing"}'
+        values: '1x5'
+      - series: 'argocd_app_info{job="argocd-application-controller-metrics",namespace="argocd",name="sample-api-dev",project="kps",dest_namespace="demo",dest_server="https://kubernetes.default.svc",sync_status="Synced",health_status="Healthy"}'
+        values: '_x6 1x24'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ArgoCdAppOutOfSync
+        exp_alerts: []

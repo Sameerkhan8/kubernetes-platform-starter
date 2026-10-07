@@ -1,0 +1,265 @@
+# kube-prometheus-stack for the local kind cluster: Prometheus Operator, Prometheus,
+# Alertmanager, Grafana, kube-state-metrics and node-exporter.
+# Chart: kube-prometheus-stack (https://prometheus-community.github.io/helm-charts),
+# version KUBE_PROMETHEUS_STACK_CHART_VERSION in versions.env.
+#
+# Local choices (all disposable, sized for a laptop):
+#   - no persistent volumes: Prometheus and Grafana data live in emptyDir and vanish with the pod
+#   - Prometheus, Alertmanager and Grafana are exposed through Traefik with Gateway API HTTPRoutes
+#   - Prometheus selects ServiceMonitors and PrometheusRules from ALL namespaces with no
+#     "release:" label coupling, so the app chart does not need to know this release name
+# scripts/platform.sh overrides the three externalUrl/root_url values when HOST_HTTP_PORT is not 80.
+
+# ---------------------------------------------------------------- kind-specific scrape targets
+# kind does not expose these control-plane endpoints to Prometheus, so their targets would be
+# "down" forever. Managed clusters (GKE, EKS, AKS) hide them too.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+# ---------------------------------------------------------------- default alert rules
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+    windows: false
+  # Switched off because this repo's own alert covers the same thing for EVERY namespace or
+  # node, with a runbook in docs/runbooks/. Nothing loses coverage.
+  disabled:
+    KubePodCrashLooping: true              # -> PlatformPodCrashLooping (all namespaces)
+    KubeNodeNotReady: true                 # -> PlatformNodeNotReady (all nodes)
+    NodeMemoryHighUtilization: true        # -> PlatformNodeMemoryHigh (all nodes)
+  # KubeHpaMaxedOut and KubeDeploymentReplicasMismatch stay ON: the SampleApi* alerts only
+  # watch sample-api, and every other workload still needs these. For sample-api itself the
+  # Alertmanager inhibit rules below hide the upstream copy, so one problem notifies once.
+
+# ---------------------------------------------------------------- where the monitoring core runs
+# Prometheus, Alertmanager and kube-state-metrics run on the control-plane node, so the
+# "worker node down" drill (docs/runbooks/PlatformNodeNotReady.md) cannot take the monitoring
+# down with it. (Production: a dedicated node pool and more than one replica.)
+
+# ---------------------------------------------------------------- Prometheus Operator
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+  prometheusConfigReloader:
+    resources:
+      requests:
+        cpu: 5m
+        memory: 24Mi
+      limits:
+        memory: 64Mi
+
+# ---------------------------------------------------------------- Prometheus
+prometheus:
+  route:
+    main:
+      enabled: true
+      hostnames:
+        - prometheus.localtest.me
+      parentRefs:
+        - name: traefik-gateway
+          namespace: traefik
+          sectionName: web
+  prometheusSpec:
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    retention: 24h
+    retentionSize: 1GB
+    externalUrl: http://prometheus.localtest.me
+    # Pick up every ServiceMonitor / PodMonitor / Probe / ScrapeConfig / PrometheusRule in
+    # every namespace, without needing a "release: kube-prometheus-stack" label on them.
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    # No storageSpec: data lives in an emptyDir. Fine for a laptop demo, not for production.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: ""
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+# ---------------------------------------------------------------- Alertmanager
+# Everything goes to a "null" receiver. Real setups route by severity to Slack, Microsoft
+# Teams or PagerDuty. "Watchdog" always fires by design: it proves the alerting pipeline is
+# alive (a dead-man's switch).
+alertmanager:
+  # The chart's default config, plus two inhibit rules at the end. Lists are not merged by
+  # Helm, so the default inhibit rules are copied here unchanged (chart 92.0.0).
+  config:
+    global:
+      resolve_timeout: 5m
+    inhibit_rules:
+      - source_matchers:
+          - 'severity = critical'
+        target_matchers:
+          - 'severity =~ warning|info'
+        equal:
+          - 'namespace'
+          - 'alertname'
+      - source_matchers:
+          - 'severity = warning'
+        target_matchers:
+          - 'severity = info'
+        equal:
+          - 'namespace'
+          - 'alertname'
+      - source_matchers:
+          - 'alertname = InfoInhibitor'
+        target_matchers:
+          - 'severity = info'
+        equal:
+          - 'namespace'
+      - target_matchers:
+          - 'alertname = InfoInhibitor'
+      # This repo: while the app's own alert fires, hide the generic upstream alert for the
+      # same object. Other deployments and HPAs keep the upstream alerts.
+      - source_matchers:
+          - 'alertname = SampleApiHpaMaxedOut'
+        target_matchers:
+          - 'alertname = KubeHpaMaxedOut'
+        equal:
+          - 'namespace'
+          - 'horizontalpodautoscaler'
+      - source_matchers:
+          - 'alertname = SampleApiReplicasUnavailable'
+        target_matchers:
+          - 'alertname = KubeDeploymentReplicasMismatch'
+        equal:
+          - 'namespace'
+          - 'deployment'
+    route:
+      group_by: ['namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: 'null'
+      routes:
+        - receiver: 'null'
+          matchers:
+            - alertname = "Watchdog"
+    receivers:
+      - name: 'null'
+    templates:
+      - '/etc/alertmanager/config/*.tmpl'
+  route:
+    main:
+      enabled: true
+      hostnames:
+        - alertmanager.localtest.me
+      parentRefs:
+        - name: traefik-gateway
+          namespace: traefik
+          sectionName: web
+  alertmanagerSpec:
+    externalUrl: http://alertmanager.localtest.me
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 96Mi
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: ""
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+# ---------------------------------------------------------------- Grafana
+grafana:
+  # Admin user and password come from the Secret "grafana-admin" (keys admin-user,
+  # admin-password). scripts/platform.sh creates it with a random password before the
+  # install. The chart's well-known default password is never used. "make creds" prints it.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  route:
+    main:
+      enabled: true
+      hostnames:
+        - grafana.localtest.me
+      parentRefs:
+        - name: traefik-gateway
+          namespace: traefik
+          sectionName: web
+  grafana.ini:
+    server:
+      root_url: http://grafana.localtest.me
+    analytics:
+      check_for_updates: false
+      reporting_enabled: false
+  persistence:
+    enabled: false
+  testFramework:
+    enabled: false
+  # The sidecar loads every ConfigMap labelled grafana_dashboard="1" from any namespace.
+  # This is how the sample-api chart ships its own dashboard.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+    resources:
+      requests:
+        cpu: 10m
+        memory: 48Mi
+      limits:
+        memory: 128Mi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 160Mi
+    limits:
+      memory: 384Mi
+
+# ---------------------------------------------------------------- exporters
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 128Mi
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      memory: 64Mi
+  # If node-exporter fails on your machine with a root-fs "mount propagation" error
+  # (seen with some Docker Desktop setups), uncomment this. Filesystem metrics then
+  # describe the container instead of the host.
+  # hostRootFsMount:
+  #   enabled: false

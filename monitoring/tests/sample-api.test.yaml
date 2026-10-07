@@ -1,0 +1,311 @@
+# Unit tests for the sample-api alerts (charts/sample-api/rules/sample-api.rules.yaml).
+# Run: promtool test rules monitoring/tests/*.test.yaml   (or: make lint-rules)
+#
+# Each test group feeds fake time series into the rules and checks which alerts fire at
+# a given time. Every alert has at least one "fires" case (exact labels and annotations)
+# and at least one "does not fire" case. Series syntax: 'a+bxN' = a, a+b, ... (N+1 samples);
+# '_' = missing sample.
+rule_files:
+  - ../../charts/sample-api/rules/sample-api.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------ SampleApiDown
+  - name: SampleApiDown fires 2m after the only target goes down
+    interval: 1m
+    input_series:
+      - series: 'up{job="sample-api",namespace="demo",pod="sample-api-6d4f9c7b8-x2x9k",instance="10.244.1.5:8000"}'
+        values: '1x3 0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SampleApiDown
+        exp_alerts: []
+      # Down since 4m: still inside the 2m "for" window.
+      - eval_time: 5m
+        alertname: SampleApiDown
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: SampleApiDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: sample-api
+            exp_annotations:
+              summary: No sample-api pod is being scraped successfully.
+              description: Prometheus has not scraped a healthy sample-api target for 2 minutes. Users are probably getting errors from the gateway.
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiDown.md
+
+  - name: SampleApiDown also fires when there is no target at all (app deleted, ServiceMonitor broken)
+    interval: 1m
+    input_series:
+      - series: 'up{job="some-other-app",namespace="demo",pod="other-1"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: SampleApiDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: SampleApiDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: sample-api
+            exp_annotations:
+              summary: No sample-api pod is being scraped successfully.
+              description: Prometheus has not scraped a healthy sample-api target for 2 minutes. Users are probably getting errors from the gateway.
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiDown.md
+
+  - name: SampleApiDown stays quiet while one of two pods is still healthy
+    interval: 1m
+    input_series:
+      - series: 'up{job="sample-api",namespace="demo",pod="sample-api-6d4f9c7b8-x2x9k"}'
+        values: '1x3 0x10'
+      - series: 'up{job="sample-api",namespace="demo",pod="sample-api-6d4f9c7b8-q7m2p"}'
+        values: '1x13'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiDown
+        exp_alerts: []
+
+  # ------------------------------------------------------------------ SampleApiHighErrorRate
+  - name: SampleApiHighErrorRate fires at 25% errors with real traffic
+    interval: 1m
+    input_series:
+      # 30 errors + 90 successes per minute = 2 req/s, 25% errors.
+      - series: 'http_requests_total{job="sample-api",namespace="demo",method="GET",path="/error",status="500"}'
+        values: '0+30x15'
+      - series: 'http_requests_total{job="sample-api",namespace="demo",method="GET",path="/",status="200"}'
+        values: '0+90x15'
+    alert_rule_test:
+      # The condition is true from 1m, so at 2m the alert is only pending.
+      - eval_time: 2m
+        alertname: SampleApiHighErrorRate
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: SampleApiHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: sample-api
+              namespace: demo
+            exp_annotations:
+              summary: sample-api is returning more than 5% errors (5xx).
+              description: '25% of sample-api requests in namespace demo returned a 5xx status over the last 5 minutes.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiHighErrorRate.md
+
+  - name: SampleApiHighErrorRate ignores very low traffic (60% errors but under 0.1 req/s)
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="sample-api",namespace="demo",method="GET",path="/error",status="500"}'
+        values: '0+3x15'
+      - series: 'http_requests_total{job="sample-api",namespace="demo",method="GET",path="/",status="200"}'
+        values: '0+2x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiHighErrorRate
+        exp_alerts: []
+
+  - name: SampleApiHighErrorRate stays quiet at 1% errors
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="sample-api",namespace="demo",method="GET",path="/error",status="500"}'
+        values: '0+1x15'
+      - series: 'http_requests_total{job="sample-api",namespace="demo",method="GET",path="/",status="200"}'
+        values: '0+99x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiHighErrorRate
+        exp_alerts: []
+
+  # ------------------------------------------------------------------ SampleApiHighLatencyP95
+  - name: SampleApiHighLatencyP95 fires when 10% of requests take 1-2.5s
+    interval: 1m
+    input_series:
+      # Cumulative histogram buckets, 100 requests per minute on "/":
+      # 60 <= 0.1s, 70 <= 0.25s, 80 <= 0.5s, 90 <= 1s, 100 <= 2.5s. p95 = 1.75s.
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="0.1"}'
+        values: '0+60x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="0.25"}'
+        values: '0+70x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="0.5"}'
+        values: '0+80x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="1.0"}'
+        values: '0+90x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="2.5"}'
+        values: '0+100x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="+Inf"}'
+        values: '0+100x15'
+    alert_rule_test:
+      # True from 1m; the 5m "for" window ends at 6m.
+      - eval_time: 5m
+        alertname: SampleApiHighLatencyP95
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: SampleApiHighLatencyP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: sample-api
+              namespace: demo
+            exp_annotations:
+              summary: sample-api p95 latency is above 500ms.
+              description: 'p95 latency in namespace demo is 1.75s (threshold 500ms; the /work CPU-burn endpoint is excluded).'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiHighLatencyP95.md
+
+  - name: SampleApiHighLatencyP95 ignores the /work CPU-burn endpoint
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/work",le="0.5"}'
+        values: '0+10x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/work",le="2.5"}'
+        values: '0+100x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/work",le="+Inf"}'
+        values: '0+100x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiHighLatencyP95
+        exp_alerts: []
+
+  - name: SampleApiHighLatencyP95 stays quiet when p95 is under 100ms
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="0.1"}'
+        values: '0+96x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="0.5"}'
+        values: '0+99x15'
+      - series: 'http_request_duration_seconds_bucket{job="sample-api",namespace="demo",method="GET",path="/",le="+Inf"}'
+        values: '0+100x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiHighLatencyP95
+        exp_alerts: []
+
+  # ------------------------------------------------------------------ SampleApiPodRestarting
+  - name: SampleApiPodRestarting fires after more than 2 restarts in 15m
+    interval: 1m
+    input_series:
+      # Restarts at minutes 6, 7, 8, 9 and 10, then the pod is stable again.
+      - series: 'kube_pod_container_status_restarts_total{job="kube-state-metrics",namespace="demo",pod="sample-api-6d4f9c7b8-x2x9k",container="sample-api"}'
+        values: '0x5 1 2 3 4 5x25'
+    alert_rule_test:
+      # 2 restarts so far: not more than 2.
+      - eval_time: 7m
+        alertname: SampleApiPodRestarting
+        exp_alerts: []
+      # 3 restarts, but the 1m "for" window is not over yet.
+      - eval_time: 8m
+        alertname: SampleApiPodRestarting
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: SampleApiPodRestarting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: sample-api
+              job: kube-state-metrics
+              namespace: demo
+              pod: sample-api-6d4f9c7b8-x2x9k
+              container: sample-api
+            exp_annotations:
+              summary: A sample-api container keeps restarting.
+              description: 'Pod demo/sample-api-6d4f9c7b8-x2x9k restarted about 5 times in the last 15 minutes.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiPodRestarting.md
+      # 15 minutes without a restart: resolved.
+      - eval_time: 30m
+        alertname: SampleApiPodRestarting
+        exp_alerts: []
+
+  # ------------------------------------------------------------------ SampleApiHpaMaxedOut
+  - name: SampleApiHpaMaxedOut fires after 5m at the maximum replica count
+    interval: 1m
+    input_series:
+      - series: 'kube_horizontalpodautoscaler_status_current_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '2 4 6x10'
+      - series: 'kube_horizontalpodautoscaler_spec_max_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '6x12'
+      - series: 'kube_horizontalpodautoscaler_spec_min_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '2x12'
+    alert_rule_test:
+      # At the maximum since 2m: still pending at 6m.
+      - eval_time: 6m
+        alertname: SampleApiHpaMaxedOut
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: SampleApiHpaMaxedOut
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: sample-api
+              namespace: demo
+              horizontalpodautoscaler: sample-api
+            exp_annotations:
+              summary: sample-api autoscaler is stuck at its maximum replicas.
+              description: 'HPA demo/sample-api has been at its maximum (6 replicas) for 5 minutes. It cannot add more capacity.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiHpaMaxedOut.md
+
+  - name: SampleApiHpaMaxedOut stays quiet below the maximum
+    interval: 1m
+    input_series:
+      - series: 'kube_horizontalpodautoscaler_status_current_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '4x12'
+      - series: 'kube_horizontalpodautoscaler_spec_max_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '6x12'
+      - series: 'kube_horizontalpodautoscaler_spec_min_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '2x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiHpaMaxedOut
+        exp_alerts: []
+
+  - name: SampleApiHpaMaxedOut stays quiet when min equals max (capacity pinned on purpose)
+    interval: 1m
+    input_series:
+      - series: 'kube_horizontalpodautoscaler_status_current_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '4x12'
+      - series: 'kube_horizontalpodautoscaler_spec_max_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '4x12'
+      - series: 'kube_horizontalpodautoscaler_spec_min_replicas{job="kube-state-metrics",namespace="demo",horizontalpodautoscaler="sample-api"}'
+        values: '4x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiHpaMaxedOut
+        exp_alerts: []
+
+  # ------------------------------------------------------------------ SampleApiReplicasUnavailable
+  - name: SampleApiReplicasUnavailable fires after 10m with fewer available pods than desired
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_spec_replicas{job="kube-state-metrics",namespace="demo",deployment="sample-api"}'
+        values: '3x20'
+      - series: 'kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="demo",deployment="sample-api"}'
+        values: '3 2x19'
+    alert_rule_test:
+      # Short of one pod since 1m: still pending at 10m.
+      - eval_time: 10m
+        alertname: SampleApiReplicasUnavailable
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: SampleApiReplicasUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: sample-api
+              namespace: demo
+              deployment: sample-api
+            exp_annotations:
+              summary: sample-api has fewer available pods than desired.
+              description: 'Deployment demo/sample-api has had fewer available replicas than desired for 10 minutes.'
+              runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/SampleApiReplicasUnavailable.md
+
+  - name: SampleApiReplicasUnavailable ignores a short dip during a rolling update
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_spec_replicas{job="kube-state-metrics",namespace="demo",deployment="sample-api"}'
+        values: '3x20'
+      - series: 'kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="demo",deployment="sample-api"}'
+        values: '3 2 2 2 3x16'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SampleApiReplicasUnavailable
+        exp_alerts: []

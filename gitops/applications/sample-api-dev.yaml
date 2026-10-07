@@ -1,0 +1,43 @@
+# Argo CD application: sample-api in the "dev" environment (namespace demo).
+# This file is the GitHub-mode manifest and is valid as-is.
+# "make gitops-local" applies a copy with repoURL pointed at the local git daemon and,
+# when IMAGE_SOURCE=local, values-local.yaml added after values-dev.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sample-api-dev
+  namespace: argocd
+  # Deleting the Application also deletes what it deployed (foreground cascade).
+  # The "/foreground" form is the domain-qualified name Kubernetes 1.36 prefers;
+  # Argo CD treats it like the older bare name.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  project: kps
+  source:
+    repoURL: https://github.com/Sameerkhan8/kubernetes-platform-starter.git
+    targetRevision: main
+    path: charts/sample-api
+    helm:
+      releaseName: sample-api
+      valueFiles:
+        - values-dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true      # delete objects that were removed from Git
+      selfHeal: true   # undo manual changes made with kubectl
+    syncOptions:
+      - CreateNamespace=true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/warn: restricted
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

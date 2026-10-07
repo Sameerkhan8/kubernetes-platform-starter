@@ -1,0 +1,8 @@
+# Local kind demo. Layered on top of values-dev.yaml by "make gitops-local".
+# The image is built on this machine and loaded into kind with "kind load docker-image",
+# so it is never pulled from a registry.
+environment: local
+image:
+  repository: sample-api
+  tag: dev
+  pullPolicy: Never

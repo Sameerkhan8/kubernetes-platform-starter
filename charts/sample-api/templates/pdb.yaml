@@ -1,0 +1,15 @@
+{{- if .Values.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sample-api.fullname" . }}
+  labels:
+    {{- include "sample-api.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  # Pods that are not Ready can always be evicted, so a broken pod never blocks a node drain.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "sample-api.selectorLabels" . | nindent 6 }}
+{{- end }}

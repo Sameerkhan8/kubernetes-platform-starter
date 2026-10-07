@@ -1,0 +1,45 @@
+# Git hooks that catch common problems before a commit. Optional, but recommended.
+#   pip install pre-commit   (or: pipx install pre-commit)
+#   pre-commit install
+#   pre-commit run --all-files
+# The terraform_fmt hook needs terraform on your PATH.
+#
+# Hooks are pinned to commit SHAs, like the GitHub Actions in .github/workflows.
+# "# frozen: vX.Y.Z" is the tag that SHA belongs to. Update with: pre-commit autoupdate --freeze
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+        # Helm templates are Go templates, not plain YAML.
+        exclude: ^charts/.*/templates/
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: f12be1ebaa5351c1fc76472de98db2c3446c8253 # frozen: v0.16.10
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^app/
+      - id: ruff-format
+        files: ^app/
+
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: 80c8033123f6d6b9ccd1a9458562ea4180742af7 # frozen: v1.109.2
+    hooks:
+      - id: terraform_fmt
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: 745eface02aef23e168a8afb6b5737818efbea95 # frozen: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # frozen: v8.30.1
+    hooks:
+      - id: gitleaks

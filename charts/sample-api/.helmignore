@@ -1,0 +1,19 @@
+# Patterns to ignore when packaging the chart.
+# Do NOT add dashboards/ or rules/: the templates read them with .Files.Get.
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.project
+.idea/
+*.tmproj
+.vscode/

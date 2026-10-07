@@ -1,0 +1,314 @@
+# CI for the sample-api application (app/).
+#
+# Pull request:  lint + unit tests -> build image -> Trivy scan. Nothing is pushed.
+# Push to main:  the same, then publish: push the image to GHCR under its immutable
+#                sha-<7 chars> tag, scan that exact pushed image again, and only if it is
+#                clean add the moving "main" tag and point the dev environment at the new
+#                tag in Git. Argo CD deploys it.
+# Tag v1.2.3:    the same publish steps, and the release tag 1.2.3 (used by values-prod.yaml).
+#
+# Every action is pinned to a full commit SHA (tags can be moved, a SHA cannot).
+# Dependabot (.github/dependabot.yml) proposes updates.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    # Path filters do not apply to tag pushes: every v* tag builds a release.
+    tags: ["v*"]
+    paths:
+      - "app/**"
+      - ".github/workflows/ci.yml"
+      - "versions.env"
+  pull_request:
+    paths:
+      - "app/**"
+      - ".github/workflows/ci.yml"
+      - "versions.env"
+  workflow_dispatch:
+
+# Nothing by default. Each job asks only for what it needs.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # Explicit bash gives "-eo pipefail", so a failing command in a pipe fails the step.
+    shell: bash
+
+jobs:
+  test:
+    name: Lint and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Load pinned versions
+        run: grep -E '^[A-Z0-9_]+=' versions.env >> "$GITHUB_ENV"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          # No pip cache: this workflow also publishes release images, and a cache shared
+          # with other runs is a cache-poisoning risk. The install takes a few seconds.
+
+      - name: Install dependencies
+        run: python -m pip install -r app/requirements-dev.txt
+
+      - name: Ruff lint
+        working-directory: app
+        run: ruff check .
+
+      - name: Ruff format check
+        working-directory: app
+        run: ruff format --check .
+
+      - name: Unit tests
+        working-directory: app
+        run: pytest -q
+
+  build-scan:
+    name: Build and scan image
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write # upload the Trivy SARIF report to the Security tab
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Load pinned versions
+        run: grep -E '^[A-Z0-9_]+=' versions.env >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image (load locally for scanning)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          target: runtime
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+          tags: sample-api:ci
+          load: true
+          # Attestations cannot be stored in the local Docker image store.
+          # The published image gets them (publish job).
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image (fail on fixable HIGH or CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: sample-api:ci
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Runs even when the scan above failed, so the findings reach the Security tab.
+      # Skipped for pull requests from forks: their token cannot write security events.
+      - name: Scan image (SARIF report)
+        id: trivy-sarif
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: sample-api:ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          limit-severities-for-sarif: true
+          exit-code: "0"
+
+      - name: Upload SARIF to GitHub code scanning
+        if: ${{ !cancelled() && steps.trivy-sarif.outcome == 'success' }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+
+  publish:
+    name: Publish image (push once, scan the pushed digest, then tag)
+    needs: build-scan
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+    outputs:
+      short_sha: ${{ steps.vars.outputs.short_sha }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Load pinned versions
+        run: grep -E '^[A-Z0-9_]+=' versions.env >> "$GITHUB_ENV"
+
+      - name: Compute image name and version
+        id: vars
+        run: |
+          # Version from app/pyproject.toml plus the commit, for example 0.1.0+3f9c2a1.
+          app_version="$(python3 -c 'import tomllib; print(tomllib.load(open("app/pyproject.toml", "rb"))["project"]["version"])')"
+          short_sha="${GITHUB_SHA::7}"
+          {
+            # GHCR image names must be lowercase (",," lowercases the owner name).
+            echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sample-api"
+            echo "short_sha=${short_sha}"
+            echo "app_version=${app_version}+${short_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Tags added only AFTER the image passed the scan below: "main" (moving, default
+      # branch only) and, for a v1.2.3 git tag, the release tag 1.2.3.
+      - name: Release tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Short-lived token scoped to this repository. No personal access token.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build once, promote the same image: if this commit was already published (a re-run,
+      # or a v* tag on a commit that main already built), reuse that exact image. The
+      # sha-<7 chars> tag is never pushed twice, so it always means one image.
+      - name: Find an image already published for this commit
+        id: existing
+        env:
+          REF: ${{ steps.vars.outputs.image }}:sha-${{ steps.vars.outputs.short_sha }}
+        run: |
+          if digest="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+            echo "Reusing $REF ($digest)"
+            echo "digest=${digest//\"/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pushed under the immutable sha-<7 chars> tag only. Nothing deploys it yet:
+      # values-dev.yaml changes only after the scan below passes.
+      - name: Push image to GHCR (with SBOM and provenance)
+        id: push
+        if: steps.existing.outputs.digest == ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          target: runtime
+          build-args: |
+            APP_VERSION=${{ steps.vars.outputs.app_version }}
+            GIT_COMMIT=${{ github.sha }}
+          tags: ${{ steps.vars.outputs.image }}:sha-${{ steps.vars.outputs.short_sha }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          # No build cache for the published image (cache-poisoning risk). The pushed
+          # digest is scanned below, so this separate build is what gets checked.
+
+      # Scan exactly what was published (by digest), not a local copy:
+      # what is deployed is always what was scanned.
+      - name: Scan the published image (fail on fixable HIGH or CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: ${{ steps.vars.outputs.image }}@${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Add the release tags to the scanned image
+        if: steps.meta.outputs.tags != ''
+        env:
+          SOURCE: ${{ steps.vars.outputs.image }}@${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          args=()
+          while IFS= read -r tag; do
+            if [[ -n "$tag" ]]; then args+=(--tag "$tag"); fi
+          done <<<"$TAGS"
+          docker buildx imagetools create "${args[@]}" "$SOURCE"
+
+  bump-dev:
+    name: Deploy to dev (update image tag in Git)
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # commit the new tag to main
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0 # full history for the "newer commit" check below
+          persist-credentials: true # needed to push the bump commit
+
+      # CI only changes a tag in Git. Argo CD notices the commit and deploys it (pull-based GitOps).
+      # A push made with GITHUB_TOKEN does not start new workflow runs, so this cannot loop.
+      # If main gets branch protection with required reviews, change this step to open a
+      # pull request instead, or allow the github-actions bot to bypass the rule.
+      - name: Point values-dev.yaml at the new image
+        env:
+          SHORT_SHA: ${{ needs.publish.outputs.short_sha }}
+        run: |
+          file=charts/sample-api/values-dev.yaml
+
+          # Never roll dev back: a re-run of an old workflow must not overwrite a newer build.
+          newer="$(git log --format=%H "${GITHUB_SHA}..HEAD" -- app/ .github/workflows/ci.yml versions.env)"
+          if [[ -n "$newer" ]]; then
+            echo "A newer commit on main changed the app. Its own run deploys it. Skipping."
+            exit 0
+          fi
+          # A person changed the dev tag after this commit (for example a rollback to an
+          # older sha- tag). That decision wins over this run.
+          manual="$(git log --format=%H --invert-grep --grep='^chore(gitops): deploy sample-api' "${GITHUB_SHA}..HEAD" -- "$file")"
+          if [[ -n "$manual" ]]; then
+            echo "values-dev.yaml was changed by hand after this commit. Not overwriting it."
+            exit 0
+          fi
+
+          yq -i '.image.tag = "sha-" + strenv(SHORT_SHA)' "$file"
+          if git diff --quiet -- "$file"; then
+            echo "values-dev.yaml already points at sha-${SHORT_SHA}. Nothing to do."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(gitops): deploy sample-api sha-${SHORT_SHA} to dev [skip ci]" -- "$file"
+          git pull --rebase origin main
+          git push origin HEAD:main

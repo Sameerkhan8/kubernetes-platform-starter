@@ -1,0 +1,18 @@
+# Test and lint tools for sample-api (used by the Dockerfile "test" stage and by CI).
+# Every package is pinned, including transitive ones.
+#
+# Regenerate: install requirements.txt plus pytest==9.1.1 httpx2==2.13.1 ruff==0.16.10
+# in python:3.14.8-slim-trixie, run pip freeze, and keep only the lines not in requirements.txt.
+#
+# Direct dependencies: pytest, ruff, and httpx2 (used by FastAPI's TestClient; Starlette 1.x
+# prefers httpx2 and shows a deprecation warning with the older httpx package).
+-r requirements.txt
+httpcore2==2.13.1
+httpx2==2.13.1
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0
+pytest==9.1.1
+ruff==0.16.10
+truststore==0.10.4

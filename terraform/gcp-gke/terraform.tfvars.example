@@ -1,0 +1,36 @@
+# Example values. Copy to terraform.tfvars (gitignored) and edit:
+#   cp terraform.tfvars.example terraform.tfvars
+# All values below are placeholders.
+
+project_id = "my-gcp-project-id"
+region     = "us-central1"
+zone       = "us-central1-a"
+regional   = false
+
+# Networks that may reach the Kubernetes API (kubectl). Use your office or VPN
+# egress IP as a /32. 203.0.113.0/24 is a documentation-only range (RFC 5737).
+master_authorized_networks = [
+  {
+    cidr_block   = "203.0.113.0/24"
+    display_name = "office-vpn-example"
+  },
+]
+
+# Node pool size, counted across all zones.
+machine_type = "e2-standard-4"
+min_nodes    = 1
+max_nodes    = 3
+
+# Spot VMs: much cheaper, can be stopped by Google at any time. OK for dev.
+spot = false
+
+# Bucket that holds this module's Terraform state. Gives the plan identity read access.
+tf_state_bucket = "my-gcp-project-id-tfstate"
+
+# GitHub repository allowed to use the CI identities, by name and by numeric ID.
+# The IDs never change, so a re-created repository with the same name cannot match.
+#   gh api repos/OWNER/REPO --jq .id     (repository ID)
+#   gh api users/OWNER --jq .id          (owner ID)
+github_repository    = "Sameerkhan8/kubernetes-platform-starter"
+github_repository_id = "123456789" # placeholder
+github_owner_id      = "12345678"  # placeholder

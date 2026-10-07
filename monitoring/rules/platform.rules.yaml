@@ -1,0 +1,48 @@
+groups:
+  - name: platform.alerts
+    rules:
+      - alert: PlatformPodCrashLooping
+        # Every namespace: this replaces the upstream KubePodCrashLooping, which is switched off.
+        expr: |
+          max_over_time(kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}[5m]) >= 1
+        for: 5m
+        labels:
+          severity: warning
+          component: platform
+        annotations:
+          summary: A container is crash looping.
+          description: 'Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} has been in CrashLoopBackOff for 5 minutes.'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/PlatformPodCrashLooping.md
+
+      - alert: PlatformNodeNotReady
+        expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: platform
+        annotations:
+          summary: A Kubernetes node is not Ready.
+          description: 'Node {{ $labels.node }} has not been Ready for 5 minutes. Pods on it may be evicted.'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/PlatformNodeNotReady.md
+
+      - alert: PlatformNodeMemoryHigh
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.90
+        for: 10m
+        labels:
+          severity: warning
+          component: platform
+        annotations:
+          summary: Node memory use is above 90%.
+          description: 'Memory use on {{ $labels.instance }} is {{ $value | humanizePercentage }}. On kind, all nodes share the laptop memory.'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/PlatformNodeMemoryHigh.md
+
+      - alert: ArgoCdAppOutOfSync
+        expr: max by (name, dest_namespace) (argocd_app_info{sync_status!="Synced"}) == 1
+        for: 15m
+        labels:
+          severity: warning
+          component: platform
+        annotations:
+          summary: An Argo CD application is not in sync with Git.
+          description: 'Argo CD application {{ $labels.name }} (target namespace {{ $labels.dest_namespace }}) has not been Synced for 15 minutes.'
+          runbook_url: https://github.com/Sameerkhan8/kubernetes-platform-starter/blob/main/docs/runbooks/ArgoCdAppOutOfSync.md

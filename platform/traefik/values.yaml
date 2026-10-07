@@ -1,0 +1,66 @@
+# Traefik as the Gateway API controller for the local kind cluster.
+# Chart: traefik (https://traefik.github.io/charts), version TRAEFIK_CHART_VERSION in versions.env.
+#
+# Traffic path: browser -> 127.0.0.1:80 -> kind control-plane container :80
+#               -> Traefik pod (hostPort 80 -> container port 8000) -> HTTPRoute -> app pod.
+# The chart creates GatewayClass "traefik" and Gateway "traefik-gateway" (listener "web").
+# Every HTTPRoute in this repo uses parentRef {name: traefik-gateway, namespace: traefik, sectionName: web}.
+
+deployment:
+  replicas: 1
+
+# hostPort + only one eligible node: a surge pod could never schedule (the port is taken),
+# so roll by stopping the old pod first. Production runs 2+ replicas behind a LoadBalancer.
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 0
+
+# Run on the control-plane node, because that is the node kind maps host ports 80/443 to.
+nodeSelector:
+  ingress-ready: "true"
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+ports:
+  web:
+    hostPort: 80     # container listens on 8000; kind maps host 127.0.0.1:80 -> node:80 -> pod:8000
+  websecure:
+    hostPort: 443    # mapped, but no HTTPS listener or certificate is set up locally (production: cert-manager)
+
+# In-cluster clients (the load Jobs) use http://traefik.traefik.svc.cluster.local:80.
+# ClusterIP, not the chart default LoadBalancer: kind has no load balancer, so a
+# LoadBalancer Service stays <pending> forever and "helm --wait" never finishes.
+# (In chart 41.x the type lives under service.spec, not service.type.)
+service:
+  spec:
+    type: ClusterIP
+
+providers:
+  kubernetesGateway:
+    enabled: true
+  kubernetesIngress:
+    enabled: true    # lets the chart's optional Ingress (className: traefik) work too
+
+gateway:
+  listeners:
+    web:
+      namespacePolicy:
+        from: All    # local simplicity; production would use a namespace Selector
+
+metrics:
+  prometheus:
+    service:
+      enabled: true
+    serviceMonitor:
+      enabled: true  # picked up by kube-prometheus-stack (it selects ServiceMonitors in all namespaces)
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

@@ -1,0 +1,73 @@
+# Argo CD for the local kind cluster.
+# Chart: argo-cd (https://argoproj.github.io/argo-helm), version ARGOCD_CHART_VERSION in versions.env.
+# Admin password: the auto-generated Secret argocd-initial-admin-secret ("make creds" prints it).
+# scripts/platform.sh overrides configs.cm.url when HOST_HTTP_PORT is not 80.
+
+global:
+  domain: argocd.localtest.me
+
+configs:
+  params:
+    server.insecure: true        # TLS is not terminated locally; the gateway speaks plain HTTP
+  cm:
+    url: http://argocd.localtest.me
+    timeout.reconciliation: 60s  # faster pickup of commits from the local git daemon
+    exec.enabled: false          # no web terminal into pods from the UI
+
+dex:
+  enabled: false                 # no SSO locally; production would use OIDC (Google, GitHub, Entra ID)
+
+notifications:
+  enabled: false
+
+server:
+  httproute:
+    enabled: true
+    hostnames:
+      - argocd.localtest.me
+    parentRefs:
+      - name: traefik-gateway
+        namespace: traefik
+        sectionName: web
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+controller:
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true              # needed for the ArgoCdAppOutOfSync alert (argocd_app_info)
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+repoServer:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+
+redis:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 96Mi
+
+applicationSet:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 128Mi

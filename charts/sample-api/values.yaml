@@ -1,0 +1,232 @@
+# Default values for the sample-api chart.
+# Environment files (values-dev.yaml, values-prod.yaml, values-local.yaml) override these.
+
+# -- Override the chart name used in resource names and the app.kubernetes.io/name label.
+nameOverride: ""
+# -- Override the full resource name. With release name "sample-api" every object is named "sample-api".
+fullnameOverride: ""
+# -- Environment name. The app returns it in GET / (env APP_ENV).
+environment: dev
+
+image:
+  # -- Container image repository. CI pushes to GHCR; the local demo uses sample-api (values-local.yaml).
+  repository: ghcr.io/sameerkhan8/sample-api
+  # -- Image tag. Empty means .Chart.AppVersion. Use immutable tags (sha-xxxxxxx) for deploys.
+  tag: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+# -- Pull secrets, needed only if the registry is private.
+imagePullSecrets: []
+
+serviceAccount:
+  # -- Create a dedicated ServiceAccount (its token is not mounted; the app does not call the API).
+  create: true
+  # -- ServiceAccount name. Empty means the full name.
+  name: ""
+  # -- ServiceAccount annotations, e.g. iam.gke.io/gcp-service-account for GKE Workload Identity.
+  annotations: {}
+
+# -- Extra pod annotations.
+podAnnotations: {}
+# -- Extra pod labels.
+podLabels: {}
+
+app:
+  # -- Container port (env APP_PORT).
+  port: 8000
+  # -- Log level: critical, error, warning, info or debug (env LOG_LEVEL).
+  logLevel: info
+  # -- Seconds the app keeps serving after SIGTERM, with /readyz returning 503 (env SHUTDOWN_DELAY_SECONDS).
+  shutdownDelaySeconds: 3
+  # -- Max seconds uvicorn waits for in-flight requests during shutdown (env GRACEFUL_TIMEOUT_SECONDS).
+  gracefulTimeoutSeconds: 10
+  # -- Upper limit for GET /work?ms=N (env WORK_MAX_MS).
+  workMaxMs: 2000
+  # -- Serve the demo-only endpoints /work and /error, the API docs (/docs, /openapi.json) and the pod/node names in GET / (env ENABLE_DEMO_ENDPOINTS). values-prod.yaml turns this off.
+  demoEndpoints: true
+# -- Extra environment variables for the container (list of EnvVar objects).
+extraEnv: []
+
+# -- Replica count. Used only when autoscaling.enabled is false (otherwise the HPA owns replicas).
+replicaCount: 2
+
+autoscaling:
+  # -- Create a HorizontalPodAutoscaler. The Deployment then has no spec.replicas, so Argo CD and the HPA never fight.
+  enabled: true
+  # -- Minimum replicas.
+  minReplicas: 2
+  # -- Maximum replicas.
+  maxReplicas: 6
+  # -- Target average CPU use, as a percentage of the CPU request (CPU-only HPA, see ADR 0001).
+  targetCPUUtilizationPercentage: 60
+  # -- HPA scaling behavior (autoscaling/v2). Fast scale-up, slow and gradual scale-down.
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      selectPolicy: Min
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+
+# -- Container resources. The CPU limit caps the laptop demo; production removes it (see values-prod.yaml).
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+strategy:
+  # -- Extra pods allowed above the desired count during a rollout.
+  maxSurge: 1
+  # -- Pods allowed to be unavailable during a rollout. 0 = never drop below the desired count.
+  maxUnavailable: 0
+# -- Seconds a new pod must stay Ready before it counts as available.
+minReadySeconds: 5
+# -- Old ReplicaSets kept for rollback.
+revisionHistoryLimit: 5
+# -- Seconds before a stuck rollout is reported as failed.
+progressDeadlineSeconds: 300
+# -- Must be longer than preStopSleepSeconds + app.shutdownDelaySeconds + app.gracefulTimeoutSeconds (10 + 3 + 10 = 23).
+terminationGracePeriodSeconds: 30
+# -- Native lifecycle.preStop.sleep (no shell needed in the image). Gives the gateway time to remove the pod. 0 disables it.
+preStopSleepSeconds: 10
+
+probes:
+  # -- Startup probe. Liveness and readiness start after it succeeds.
+  startup:
+    path: /healthz
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 30
+  # -- Liveness probe. A failure restarts the container.
+  liveness:
+    path: /healthz
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  # -- Readiness probe. A failure removes the pod from the Service endpoints. Returns 503 while draining.
+  readiness:
+    path: /readyz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+
+# -- Pod security context. Meets the Pod Security "restricted" profile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+# -- Container security context. Read-only root filesystem; /tmp is an emptyDir.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+topologySpread:
+  # -- Spread pods across zones and nodes (topology.kubernetes.io/zone and kubernetes.io/hostname).
+  enabled: true
+  # -- Maximum allowed difference in pod count between zones (and between nodes).
+  maxSkew: 1
+  # -- ScheduleAnyway = best effort: never leave a pod Pending because of spreading.
+  whenUnsatisfiable: ScheduleAnyway
+
+pdb:
+  # -- Create a PodDisruptionBudget (protects against node drains taking all pods at once).
+  enabled: true
+  # -- Pods that must stay available during voluntary disruptions. Keep it below the minimum replica count.
+  minAvailable: 1
+
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Service port (targets the container port named "http").
+  port: 80
+
+httpRoute:
+  # -- Create a Gateway API HTTPRoute.
+  enabled: true
+  # -- Hostnames served by the route.
+  hostnames:
+    - app.localtest.me
+  # -- Gateways (and listeners) the route attaches to.
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik
+      sectionName: web
+  # -- Request matches (Gateway API HTTPRouteMatch list) sent to the app. The local demo routes every path; values-prod.yaml routes only the public API, so /metrics is never public.
+  matches:
+    - path:
+        type: PathPrefix
+        value: /
+
+# Optional Ingress, for clusters that still use the Ingress API.
+ingress:
+  # -- Create an Ingress (off by default; the chart uses Gateway API).
+  enabled: false
+  # -- IngressClass name, e.g. traefik.
+  className: ""
+  # -- Ingress annotations.
+  annotations: {}
+  # -- Hostname for the Ingress rule.
+  host: app.example.com
+  # -- TLS entries (list of {hosts, secretName}).
+  tls: []
+
+networkPolicy:
+  # -- Create NetworkPolicies.
+  enabled: true
+  # -- Namespace-wide default deny for ingress traffic. Turn off in shared namespaces.
+  defaultDenyIngress: true
+  # -- Namespaces allowed to reach the app port (the gateway and Prometheus).
+  allowFromNamespaces:
+    - traefik
+    - monitoring
+  # -- CIDRs allowed to reach the app port (ipBlock), for cloud load balancers that send traffic straight to pod IPs. See values-prod.yaml.
+  allowFromCIDRs: []
+  # -- Namespace-wide default deny for egress traffic. DNS to kube-dns stays allowed. The app itself calls nothing. Turn off in shared namespaces.
+  defaultDenyEgress: true
+
+serviceMonitor:
+  # -- Create a Prometheus Operator ServiceMonitor (job label = "sample-api").
+  enabled: true
+  # -- Scrape interval.
+  interval: 15s
+  # -- Scrape timeout.
+  scrapeTimeout: 10s
+  # -- Extra labels. Add "release: <name>" if your Prometheus selects ServiceMonitors by label.
+  labels: {}
+
+prometheusRule:
+  # -- Create a PrometheusRule with the app alerts from rules/sample-api.rules.yaml.
+  enabled: true
+  # -- Extra labels for the PrometheusRule.
+  labels: {}
+
+grafanaDashboard:
+  # -- Create a ConfigMap with the Grafana dashboard from dashboards/sample-api.json.
+  enabled: true
+  # -- Labels the Grafana sidecar uses to find dashboards.
+  labels:
+    grafana_dashboard: "1"
+
+# -- Node selector for the pods.
+nodeSelector: {}
+# -- Tolerations for the pods.
+tolerations: []
+# -- Affinity rules for the pods.
+affinity: {}
